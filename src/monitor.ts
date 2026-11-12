@@ -106,7 +106,7 @@ export const TopHatMonitor = GObject.registerClass(
     private menuRow = 0;
     private menuCol = 0;
     protected menuNumCols = 0;
-    private menuActionBox: St.BoxLayout;
+    protected menuActionBox: St.BoxLayout;
     protected historyChart: HistoryChart | null;
     protected metadata: ExtensionMetadata;
     protected color: string;
@@ -192,7 +192,11 @@ export const TopHatMonitor = GObject.registerClass(
         [this.color, this.useAccentColor] = this.updateColor();
       });
 
-      this.meter.connect('notify::vertical', () => {
+      const signalName =
+        'set_orientation' in St.BoxLayout.prototype
+          ? 'notify::orientation'
+          : 'notify::vertical';
+      this.meter.connect(signalName, () => {
         this.meter.reorient();
       });
     }

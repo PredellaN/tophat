@@ -23,6 +23,7 @@
     "lint:fix": "eslint ./src --fix",
     "format": "prettier . --write",
     "translate": "./resources/translate.sh",
-    "package": "./resources/package.sh"
+    "package": "./resources/package.sh",
+    "install:extension": "./install.sh"
   }
 }

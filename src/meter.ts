@@ -197,8 +197,14 @@ export const TopHatMeter = GObject.registerClass(
 
     public reorient() {
       // This is to play nice with the dash-to-panel extension
-      const wasVertical = this.vertical;
-      this.set_vertical(false);
+      let wasVertical = false;
+      if ('set_orientation' in St.BoxLayout.prototype) {
+        wasVertical = this.get_orientation() === Clutter.Orientation.VERTICAL;
+        this.set_orientation(Clutter.Orientation.HORIZONTAL);
+      } else {
+        wasVertical = this.vertical ?? false;
+        this.set_vertical(false);
+      }
       this.set_x_expand(false);
       this.set_x_align(Clutter.ActorAlign.CENTER);
       this.set_y_align(Clutter.ActorAlign.CENTER);

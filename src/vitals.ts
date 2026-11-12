@@ -289,6 +289,81 @@ export const Vitals = GObject.registerClass(
         0,
         0
       ),
+      'gpu-usage': GObject.ParamSpec.float(
+        'gpu-usage',
+        'GPU usage',
+        'Proportion of GPU usage as a value between 0.0 - 1.0',
+        GObject.ParamFlags.READWRITE,
+        0,
+        1,
+        0
+      ),
+      'gpu-model': GObject.ParamSpec.string(
+        'gpu-model',
+        'GPU model',
+        'GPU model',
+        GObject.ParamFlags.READWRITE,
+        ''
+      ),
+      'gpu-power': GObject.ParamSpec.float(
+        'gpu-power',
+        'GPU power',
+        'GPU power consumption in Watts',
+        GObject.ParamFlags.READWRITE,
+        0,
+        2000,
+        0
+      ),
+      'gpu-mem-usage': GObject.ParamSpec.float(
+        'gpu-mem-usage',
+        'GPU memory usage',
+        'Proportion of GPU memory usage as a value between 0.0 - 1.0',
+        GObject.ParamFlags.READWRITE,
+        0,
+        1,
+        0
+      ),
+      'gpu-mem-total': GObject.ParamSpec.float(
+        'gpu-mem-total',
+        'GPU total memory',
+        'Size of total GPU memory in GB',
+        GObject.ParamFlags.READWRITE,
+        0,
+        10000,
+        0
+      ),
+      'gpu-mem-used': GObject.ParamSpec.float(
+        'gpu-mem-used',
+        'GPU memory used',
+        'Size of used GPU memory in GB',
+        GObject.ParamFlags.READWRITE,
+        0,
+        10000,
+        0
+      ),
+      'gpu-mem-free': GObject.ParamSpec.float(
+        'gpu-mem-free',
+        'GPU memory free',
+        'Size of available GPU memory in GB',
+        GObject.ParamFlags.READWRITE,
+        0,
+        10000,
+        0
+      ),
+      'gpu-status': GObject.ParamSpec.string(
+        'gpu-status',
+        'GPU status',
+        'GPU runtime PM status',
+        GObject.ParamFlags.READWRITE,
+        'unknown'
+      ),
+      'gpu-history': GObject.ParamSpec.string(
+        'gpu-history',
+        'GPU usage history',
+        'GPU usage history',
+        GObject.ParamFlags.READWRITE,
+        ''
+      ),
     },
   },
   class Vitals extends GObject.Object {
@@ -310,10 +385,17 @@ export const Vitals = GObject.registerClass(
     private fsLoop = 0;
     private groupRelated;
     private showCpu;
+    private showGpu;
     private showMem;
     private showNet;
     private showDisk;
     private showFS;
+    private gpuPciId = '0000:01:00.0';
+    private cachedGpuModel = '';
+    private cachedGpuMemTotal = 0;
+    private gpuUsageHistory = new Array<GpuUsage>(MaxHistoryLen);
+    private gpuQueryRunning = false;
+    private prevGpuIrqSum = -1;
     private netDev;
     private netDevs;
     private fsMount;
@@ -345,6 +427,9 @@ export const Vitals = GObject.registerClass(
       for (let i = 0; i < this.diskActivityHistory.length; i++) {
         this.diskActivityHistory[i] = new DiskActivity();
       }
+      for (let i = 0; i < this.gpuUsageHistory.length; i++) {
+        this.gpuUsageHistory[i] = new GpuUsage();
+      }
       this.settingSignals = new Array<number>(0);
       this.summary_interval =
         SummaryIntervalDefault * refreshRateModifier(this.gsettings);
@@ -369,6 +454,24 @@ export const Vitals = GObject.registerClass(
         'changed::show-cpu',
         (settings: Gio.Settings) => {
           this.showCpu = settings.get_boolean('show-cpu');
+        }
+      );
+      this.settingSignals.push(id);
+
+      this.showGpu = gsettings.get_boolean('show-gpu');
+      id = this.gsettings.connect(
+        'changed::show-gpu',
+        (settings: Gio.Settings) => {
+          this.showGpu = settings.get_boolean('show-gpu');
+        }
+      );
+      this.settingSignals.push(id);
+
+      this.gpuPciId = gsettings.get_string('gpu-pci-id') || '0000:01:00.0';
+      id = this.gsettings.connect(
+        'changed::gpu-pci-id',
+        (settings: Gio.Settings) => {
+          this.gpuPciId = settings.get_string('gpu-pci-id') || '0000:01:00.0';
         }
       );
       this.settingSignals.push(id);
@@ -510,6 +613,9 @@ export const Vitals = GObject.registerClass(
     public readSummaries(): boolean {
       if (this.showCpu) {
         this.loadStat();
+      }
+      if (this.showGpu) {
+        this.loadGpu();
       }
       if (this.showMem) {
         this.loadMeminfo();
@@ -1598,6 +1704,307 @@ export const Vitals = GObject.registerClass(
       this.notify('summary-interval');
     }
 
+    public get gpu_usage(): number {
+      return this.props.gpu_usage;
+    }
+
+    private set gpu_usage(v: number) {
+      if (this.gpu_usage === v) {
+        return;
+      }
+      this.props.gpu_usage = v;
+      this.notify('gpu-usage');
+    }
+
+    public get gpu_model(): string {
+      return this.props.gpu_model;
+    }
+
+    private set gpu_model(v: string) {
+      if (this.gpu_model === v) {
+        return;
+      }
+      this.props.gpu_model = v;
+      this.notify('gpu-model');
+    }
+
+    public get gpu_power(): number {
+      return this.props.gpu_power;
+    }
+
+    private set gpu_power(v: number) {
+      if (this.gpu_power === v) {
+        return;
+      }
+      this.props.gpu_power = v;
+      this.notify('gpu-power');
+    }
+
+    public get gpu_mem_usage(): number {
+      return this.props.gpu_mem_usage;
+    }
+
+    private set gpu_mem_usage(v: number) {
+      if (this.gpu_mem_usage === v) {
+        return;
+      }
+      this.props.gpu_mem_usage = v;
+      this.notify('gpu-mem-usage');
+    }
+
+    public get gpu_mem_total(): number {
+      return this.props.gpu_mem_total;
+    }
+
+    private set gpu_mem_total(v: number) {
+      if (this.gpu_mem_total === v) {
+        return;
+      }
+      this.props.gpu_mem_total = v;
+      this.notify('gpu-mem-total');
+    }
+
+    public get gpu_mem_used(): number {
+      return this.props.gpu_mem_used;
+    }
+
+    private set gpu_mem_used(v: number) {
+      if (this.gpu_mem_used === v) {
+        return;
+      }
+      this.props.gpu_mem_used = v;
+      this.notify('gpu-mem-used');
+    }
+
+    public get gpu_mem_free(): number {
+      return this.props.gpu_mem_free;
+    }
+
+    private set gpu_mem_free(v: number) {
+      if (this.gpu_mem_free === v) {
+        return;
+      }
+      this.props.gpu_mem_free = v;
+      this.notify('gpu-mem-free');
+    }
+
+    public get gpu_status(): string {
+      return this.props.gpu_status;
+    }
+
+    private set gpu_status(v: string) {
+      if (this.gpu_status === v) {
+        return;
+      }
+      this.props.gpu_status = v;
+      this.notify('gpu-status');
+    }
+
+    public get gpu_history(): string {
+      return this.props.gpu_history;
+    }
+
+    private set gpu_history(v: string) {
+      if (this.gpu_history === v) {
+        return;
+      }
+      this.props.gpu_history = v;
+      this.notify('gpu-history');
+    }
+
+    public getGpuHistory() {
+      return this.gpuUsageHistory;
+    }
+
+    private hashGpuHistory(): string {
+      return this.gpuUsageHistory.map((u) => u.usedGpu.toFixed(2)).join('');
+    }
+
+    private loadGpu() {
+      const pciPath = `/sys/bus/pci/devices/${this.gpuPciId}/power/runtime_status`;
+      const fallbackPciPath =
+        '/sys/bus/pci/devices/0000:01:00.0/power/runtime_status';
+      let path = pciPath;
+      let statusFile = new File(path);
+      if (!statusFile.exists()) {
+        path = fallbackPciPath;
+        statusFile = new File(path);
+      }
+
+      if (statusFile.exists()) {
+        statusFile
+          .read()
+          .then((status) => {
+            const s = status.trim().toLowerCase();
+            // Stage 1: If not active (e.g. suspended, suspending, resuming),
+            // report suspended and reset cached interrupt baseline.
+            if (s !== 'active') {
+              this.prevGpuIrqSum = -1;
+              this.handleGpuData(0, 0, 0, 0, 'suspended');
+              return;
+            }
+
+            // Stage 2: Active state. Check PCIe interrupt activity in /proc/interrupts
+            this.checkGpuInterruptsAndQuery();
+          })
+          .catch(() => {
+            this.queryNvidiaSmi();
+          });
+      } else {
+        this.queryNvidiaSmi();
+      }
+    }
+
+    private checkGpuInterruptsAndQuery() {
+      const interruptsFile = new File('/proc/interrupts');
+      if (!interruptsFile.exists()) {
+        this.queryNvidiaSmi();
+        return;
+      }
+
+      interruptsFile
+        .read()
+        .then((contents) => {
+          const currIrqSum = this.getGpuIrqSum(contents);
+
+          // On first tick transitioning to active, establish baseline and wait one tick
+          if (this.prevGpuIrqSum < 0) {
+            this.prevGpuIrqSum = currIrqSum;
+            this.handleGpuData(0, 0, 0, 0, 'active');
+            return;
+          }
+
+          let irqDelta = currIrqSum - this.prevGpuIrqSum;
+          this.prevGpuIrqSum = currIrqSum;
+          if (irqDelta < 0) {
+            irqDelta = 0;
+          }
+
+          // If delta <= 25, GPU is idle / counting down or D3 teardown burst; let it suspend
+          if (irqDelta <= 25) {
+            this.handleGpuData(0, 0, 0, 0, 'active');
+          } else {
+            // Workload active; safe to query nvidia-smi
+            this.queryNvidiaSmi();
+          }
+        })
+        .catch(() => {
+          this.queryNvidiaSmi();
+        });
+    }
+
+    private getGpuIrqSum(contents: string): number {
+      const lines = contents.split('\n');
+      for (const line of lines) {
+        if (
+          line.includes(this.gpuPciId) ||
+          line.includes('0000:01:00.0') ||
+          line.includes('nvidia')
+        ) {
+          const tokens = line.trim().split(/\s+/);
+          let sum = 0;
+          for (let i = 1; i < tokens.length; i++) {
+            if (/^\d+$/.test(tokens[i])) {
+              sum += parseInt(tokens[i], 10);
+            }
+          }
+          return sum;
+        }
+      }
+      return 0;
+    }
+
+    private queryNvidiaSmi() {
+      if (this.gpuQueryRunning) {
+        return;
+      }
+      this.gpuQueryRunning = true;
+      try {
+        const proc = Gio.Subprocess.new(
+          [
+            'nvidia-smi',
+            '--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,name',
+            '--format=csv,noheader,nounits',
+          ],
+          Gio.SubprocessFlags.STDOUT_PIPE
+        );
+        proc
+          .communicate_utf8_async(null, null)
+          .then(([stdout]) => {
+            this.gpuQueryRunning = false;
+            if (stdout) {
+              const line = (stdout as unknown as string).trim().split('\n')[0];
+              const parts = line.split(',').map((p) => p.trim());
+              if (parts.length >= 4) {
+                const util = parseFloat(parts[0]) || 0;
+                const usedMib = parseFloat(parts[1]) || 0;
+                const totalMib = parseFloat(parts[2]) || 0;
+                const powerDraw = parseFloat(parts[3]) || 0;
+                const name = parts[4] || this.cachedGpuModel;
+                this.handleGpuData(
+                  util,
+                  usedMib,
+                  totalMib,
+                  powerDraw,
+                  'active',
+                  name
+                );
+                return;
+              }
+            }
+            this.handleGpuData(0, 0, 0, 0, 'unknown');
+          })
+          .catch((e) => {
+            this.gpuQueryRunning = false;
+            console.warn(`[TopHat] error in nvidia-smi: ${e}`);
+          });
+      } catch (e) {
+        this.gpuQueryRunning = false;
+        console.warn(`[TopHat] error launching nvidia-smi: ${e}`);
+      }
+    }
+
+    private handleGpuData(
+      utilPercent: number,
+      usedMib: number,
+      totalMib: number,
+      powerDraw: number,
+      status: string,
+      name?: string
+    ) {
+      if (name) {
+        this.cachedGpuModel = name;
+        this.gpu_model = name;
+      } else if (this.cachedGpuModel) {
+        this.gpu_model = this.cachedGpuModel;
+      }
+
+      if (totalMib > 0) {
+        this.cachedGpuMemTotal = (totalMib * 1024 * 1024) / ONE_GB_IN_B;
+      }
+
+      const totalGB = this.cachedGpuMemTotal;
+      const usedGB = (usedMib * 1024 * 1024) / ONE_GB_IN_B;
+      const freeGB = Math.max(0, totalGB - usedGB);
+      const memFraction = totalGB > 0 ? usedGB / totalGB : 0;
+      const gpuFraction = utilPercent / 100;
+
+      const usage = new GpuUsage();
+      usage.usedGpu = gpuFraction;
+      if (this.gpuUsageHistory.unshift(usage) > MaxHistoryLen) {
+        this.gpuUsageHistory.pop();
+      }
+
+      this.gpu_status = status;
+      this.gpu_usage = gpuFraction;
+      this.gpu_power = powerDraw;
+      this.gpu_mem_usage = memFraction;
+      this.gpu_mem_used = usedGB;
+      this.gpu_mem_total = totalGB;
+      this.gpu_mem_free = freeGB;
+      this.gpu_history = this.hashGpuHistory();
+    }
+
     public override vfunc_dispose(): void {
       for (const s of this.settingSignals) {
         this.gsettings.disconnect(s);
@@ -1636,6 +2043,15 @@ class Properties {
   fs_usage = 0;
   fs_list = '';
   summary_interval = 0;
+  gpu_usage = 0;
+  gpu_model = '';
+  gpu_power = 0;
+  gpu_mem_usage = 0;
+  gpu_mem_total = 0;
+  gpu_mem_used = 0;
+  gpu_mem_free = 0;
+  gpu_status = 'unknown';
+  gpu_history = '';
 }
 
 export type Vitals = InstanceType<typeof Vitals>;
@@ -1856,6 +2272,24 @@ class MemUsage implements IHistory {
 
   public toString(): string {
     return `Memory usage: ${this.usedMem.toFixed(2)} Swap usage: ${this.usedSwap.toFixed(2)}`;
+  }
+}
+
+class GpuUsage implements IHistory {
+  public usedGpu = 0;
+
+  public val() {
+    return this.usedGpu;
+  }
+
+  public copy() {
+    const c = new GpuUsage();
+    c.usedGpu = this.usedGpu;
+    return c;
+  }
+
+  public toString(): string {
+    return `GPU usage: ${(this.usedGpu * 100).toFixed(0)}%`;
   }
 }
 
